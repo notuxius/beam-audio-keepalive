@@ -1,0 +1,45 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="local.xreal.beamaudiokeepalive"
+    android:versionCode="16"
+    android:versionName="1.13">
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="30" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.READ_LOGS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <application android:label="Beam Audio Keepalive"
+        android:icon="@mipmap/ic_launcher"
+        android:theme="@android:style/Theme.Material.NoActionBar"
+        android:allowBackup="false">
+        <!-- Keep the settings task out of the Beam's app-closing flow. -->
+        <activity android:name=".Controls" android:exported="true"
+            android:icon="@mipmap/ic_launcher"
+            android:autoRemoveFromRecents="true" android:excludeFromRecents="true"
+            android:persistableMode="persistNever">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <service android:name=".SilencePlayback" android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+        <receiver android:name=".SilencePlayback$BootReceiver" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+        <receiver android:name=".BootVideoRecovery" android:exported="true"
+            android:label="Beam boot video recovery"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data android:name="android.app.device_admin" android:resource="@xml/boot_video_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+        <service android:name=".ModeAudioRecovery" android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+    </application>
+</manifest>
