@@ -5,8 +5,10 @@ import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -40,7 +42,7 @@ public final class Controls extends Activity {
             } else {
                 stopService(new Intent(this, SilencePlayback.class));
             }
-            finishAndRemoveTask();
+            finish();
         });
         content.addView(automatic, LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -75,11 +77,45 @@ public final class Controls extends Activity {
             } else {
                 startForegroundService(service);
             }
-            finishAndRemoveTask();
+            finish();
         });
         troubleshooting.addView(recovery);
 
         if (SilencePlayback.OS_384.equals(Build.FINGERPRINT)) {
+            boolean protectedPlayback = PlaybackProtection.enabled(this);
+            Button protection = new Button(this);
+            protection.setText(protectedPlayback ? "Turn off Playback Protection" : "Turn on Playback Protection");
+            protection.setOnClickListener(view -> {
+                PlaybackProtection.setEnabled(this, !protectedPlayback);
+                if (protectedPlayback) {
+                    stopService(new Intent(this, PlaybackProtection.class));
+                } else {
+                    PlaybackProtection.startIfEnabled(this);
+                }
+                finish();
+            });
+            troubleshooting.addView(protection);
+            if (protectedPlayback) {
+                TextView warning = new TextView(this);
+                warning.setText("Stop playback before turning protection off.");
+                warning.setGravity(Gravity.CENTER);
+                troubleshooting.addView(warning);
+                if (!Settings.canDrawOverlays(this)) {
+                    Button allowReturn = new Button(this);
+                    allowReturn.setText("Allow automatic return to apps");
+                    allowReturn.setOnClickListener(view -> startActivity(new Intent(
+                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:" + getPackageName()))));
+                    troubleshooting.addView(allowReturn);
+                }
+                if (!PlayerAccess.granted(this)) {
+                    Button allowPause = new Button(this);
+                    allowPause.setText("Allow Pause in other players");
+                    allowPause.setOnClickListener(view -> startActivity(new Intent(
+                            Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
+                    troubleshooting.addView(allowPause);
+                }
+            }
+
             Button videoRecovery = new Button(this);
             DevicePolicyManager policy = getSystemService(DevicePolicyManager.class);
             ComponentName admin = new ComponentName(this, BootVideoRecovery.class);
@@ -93,7 +129,7 @@ public final class Controls extends Activity {
                             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                             .putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin));
                 }
-                finishAndRemoveTask();
+                finish();
             });
             troubleshooting.addView(videoRecovery);
             if (adminActive && !BootVideoRecovery.enabled(this)) {
@@ -105,7 +141,7 @@ public final class Controls extends Activity {
         }
         Button done = new Button(this, null, android.R.attr.borderlessButtonStyle);
         done.setText("Done");
-        done.setOnClickListener(view -> finishAndRemoveTask());
+        done.setOnClickListener(view -> finish());
         content.addView(done, LinearLayout.LayoutParams.WRAP_CONTENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT);
 
@@ -122,5 +158,6 @@ public final class Controls extends Activity {
         content.addView(version);
         setContentView(content);
         SilencePlayback.startIfEnabled(this);
+        PlaybackProtection.startIfEnabled(this);
     }
 }

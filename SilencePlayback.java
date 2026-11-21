@@ -40,6 +40,7 @@ public final class SilencePlayback extends Service {
     private static final String CHANNEL = "playback";
     private static final String STOP = "stop";
     private static final String AUTO = "auto";
+    private static final String DP_SETTLED = "dp_settled";
     private static final int SAMPLE_RATE = 48000;
     private static final long POLL_MS = 500;
     // shortcut: this stock Beam's mixer enters standby 3 s after its last track stops.
@@ -81,8 +82,13 @@ public final class SilencePlayback extends Service {
     }
 
     static void startIfEnabled(Context context) {
-        if (autoEnabled(context) && !ModeAudioRecovery.isRunning()) {
-            context.startForegroundService(new Intent(context, SilencePlayback.class).setAction(AUTO));
+        startIfEnabled(context, false);
+    }
+
+    static void startIfEnabled(Context context, boolean displayPortSettled) {
+        if (autoEnabled(context) && !ModeAudioRecovery.isRunning() && !PlaybackProtection.switchArmed()) {
+            context.startForegroundService(new Intent(context, SilencePlayback.class).setAction(AUTO)
+                    .putExtra(DP_SETTLED, displayPortSettled));
         }
     }
 
@@ -93,6 +99,7 @@ public final class SilencePlayback extends Service {
             if (Intent.ACTION_BOOT_COMPLETED.equals(action)
                     || Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) {
                 startIfEnabled(context);
+                PlaybackProtection.startIfEnabled(context);
             }
             if (Intent.ACTION_BOOT_COMPLETED.equals(action) && BootVideoRecovery.enabled(context)) {
                 PendingResult result = goAsync();
@@ -131,11 +138,14 @@ public final class SilencePlayback extends Service {
         if (intent != null && STOP.equals(intent.getAction())) {
             setAutoEnabled(this, false);
         }
-        if (!autoEnabled(this) || ModeAudioRecovery.isRunning()) {
+        if (!autoEnabled(this) || ModeAudioRecovery.isRunning() || PlaybackProtection.switchArmed()) {
             stopSelf();
             return START_NOT_STICKY;
         }
-        if (!automatic) startAutomatic();
+        if (!automatic) {
+            focusAttempted = homeResetAttempted = intent != null && intent.getBooleanExtra(DP_SETTLED, false);
+            startAutomatic();
+        }
         return START_STICKY;
     }
 
@@ -190,7 +200,7 @@ public final class SilencePlayback extends Service {
         });
     }
 
-    private static boolean readDpLink() {
+    static boolean readDpLink() {
         Process getprop = null;
         try {
             getprop = new ProcessBuilder("/system/bin/getprop", "vendor.hwc.device.display-0").start();

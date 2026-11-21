@@ -46,7 +46,7 @@ public final class ModeAudioRecovery extends Service implements DisplayManager.D
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA).build())
                 .build();
-        lastWidth = modeWidth();
+        lastWidth = modeWidth(displays);
         displays.registerDisplayListener(this, handler);
     }
 
@@ -65,11 +65,11 @@ public final class ModeAudioRecovery extends Service implements DisplayManager.D
     @Override
     public void onDisplayChanged(int displayId) {
         if (displayId != Display.DEFAULT_DISPLAY) return;
-        int width = modeWidth();
+        int width = modeWidth(displays);
         if (width == 0 || width == lastWidth) return;
         int previousWidth = lastWidth;
         lastWidth = width;
-        if (previousWidth == 0) return;
+        if (previousWidth == 0 || PlaybackProtection.switchArmed()) return;
 
         for (AudioDeviceInfo device : audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
             if (device.getType() == AudioDeviceInfo.TYPE_USB_HEADSET
@@ -85,7 +85,7 @@ public final class ModeAudioRecovery extends Service implements DisplayManager.D
         handler.postDelayed(releaseFocus, PAUSE_MS);
     }
 
-    private int modeWidth() {
+    static int modeWidth(DisplayManager displays) {
         Display display = displays.getDisplay(Display.DEFAULT_DISPLAY);
         if (display == null) return 0;
         Display.Mode mode = display.getMode();
