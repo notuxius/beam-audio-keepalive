@@ -8,13 +8,8 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.PixelFormat;
 import android.hardware.display.DisplayManager;
-import android.media.AudioAttributes;
 import android.media.AudioDeviceInfo;
-import android.media.AudioFocusRequest;
 import android.media.AudioManager;
-import android.media.session.MediaController;
-import android.media.session.MediaSession;
-import android.media.session.PlaybackState;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -23,7 +18,7 @@ import android.os.PowerManager;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.util.Log;
-import android.view.KeyEvent;
+import android.view.Display;
 import android.view.View;
 import android.view.WindowManager;
 
@@ -31,7 +26,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 
-final class PreparedSwitch {
+final class PreparedSwitch implements DisplayManager.DisplayListener {
     private static final String TAG = "BeamPreparedSwitch";
     private static final long POLL_MS = 500;
     private static final long ARM_MS = 40000;
@@ -43,7 +38,6 @@ final class PreparedSwitch {
     private static final long PLAYER_READY_MS = 5500;
     private static final long HOME_HANDOFF_MS = 20000;
     private static final long PAUSE_CHECK_MS = 200;
-    private static final long PAUSE_RETRY_MS = 750;
     private static final long USB_ENUMERATION_MS = 2000;
     private static final long DP_HANDOFF_POLL_MS = 350;
     // shortcut: match the Beam's Android display fade-out until the glasses' optical fade is measured.
@@ -53,9 +47,6 @@ final class PreparedSwitch {
     private final HandlerThread thread = new HandlerThread("Beam switch checks");
     private final Handler reader;
     private final AudioManager audio;
-    private final AudioFocusRequest pauseFocus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-            .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build())
-            .build();
     private final DisplayManager displays;
     private final ForegroundTasks tasks = new ForegroundTasks();
     private Process activityLog;
@@ -69,27 +60,30 @@ final class PreparedSwitch {
     private boolean armed;
     private boolean paused;
     private boolean awaitingTap;
+    private boolean revealing;
     private int expectedUsb = -1;
+    private int expectedWidth;
+    private int lastWidth;
     private ForegroundTasks.Task savedApp;
     private SwitchReadiness readiness;
     private View blackScreen;
     private boolean waitForPlayer;
-    private long pauseRequestedAt;
-    private MediaSession.Token pauseRequestedTo;
-    private boolean pauseKeySent;
-    private boolean pauseFocusTried;
+    private SwitchPlayer switchPlayer;
     private boolean dpHandoffAvailable;
     private long homeHandoffStartedAt;
-    private ForegroundTasks.Task enumeratingPlayer;
-    private final Runnable clearUnconfirmedUsbCover = () -> {
-        enumeratingPlayer = null;
-        if (!armed) clearScreen();
+    private boolean usbUnconfirmed;
+    private final Runnable endUnconfirmedUsb = () -> {
+        if (!usbUnconfirmed) return;
+        usbUnconfirmed = false;
+        finish("USB audio did not connect.", false, true);
     };
 
     PreparedSwitch(PlaybackProtection service) {
         this.service = service;
         this.audio = service.getSystemService(AudioManager.class);
         this.displays = service.getSystemService(DisplayManager.class);
+        lastWidth = ModeAudioRecovery.modeWidth(displays);
+        displays.registerDisplayListener(this, main);
         thread.start();
         reader = new Handler(thread.getLooper());
         startLogMonitor();
@@ -98,21 +92,47 @@ final class PreparedSwitch {
 
     boolean armed() { return armed; }
     boolean paused() { return paused; }
-    boolean automaticAudioSwitch() { return expectedUsb != -1; }
+    boolean automaticSwitch() { return expectedUsb != -1 || expectedWidth != 0; }
     boolean awaitingTap() { return awaitingTap; }
 
     private void coverEarlyUsb(ForegroundTasks.Task target) {
         if (armed || closed || target == null || target != tasks.current()
                 || !service.getSystemService(PowerManager.class).isInteractive()
                 || !SilencePlayback.GLASSES_PORT_PARTNER.exists()) return;
-        if (!hasPlayer(target)) return;
-        if (enumeratingPlayer != target || blackScreen == null) {
-            enumeratingPlayer = target;
-            coverScreen(false);
-            if (blackScreen != null) Log.i(TAG, "Covering the player while USB enumerates");
-        }
-        main.removeCallbacks(clearUnconfirmedUsbCover);
-        main.postDelayed(clearUnconfirmedUsbCover, USB_ENUMERATION_MS);
+        if (!audio.isMusicActive() && !hasPlayer(target)) return;
+        expectedUsb = 1;
+        usbUnconfirmed = true;
+        Log.i(TAG, "Preparing the player while USB enumerates");
+        beginSwitch(target, new SwitchReadiness(0), ++generation);
+        main.postDelayed(endUnconfirmedUsb, USB_ENUMERATION_MS);
+    }
+
+    @Override public void onDisplayAdded(int id) {}
+    @Override public void onDisplayRemoved(int id) {}
+
+    boolean handlesModeSwitch() {
+        return !closed && (armed || (tasks.current() != null && Settings.canDrawOverlays(service)
+                && service.getSystemService(PowerManager.class).isInteractive()
+                && SilencePlayback.GLASSES_PORT_PARTNER.exists()));
+    }
+
+    @Override
+    public void onDisplayChanged(int id) {
+        if (id != Display.DEFAULT_DISPLAY) return;
+        int width = ModeAudioRecovery.modeWidth(displays);
+        if (width == 0 || width == lastWidth) return;
+        int previous = lastWidth;
+        lastWidth = width;
+        if (previous == 0 || !handlesModeSwitch() || homeHandoffStartedAt != 0) return;
+        if (armed && !automaticSwitch() && !revealing) return;
+        ForegroundTasks.Task target = armed ? savedApp : tasks.current();
+        int route = audioRoute();
+        if (target == null || !tasks.canReturnTo(target)
+                || (!armed && (route < 0 || (!hasPlayer(target) && !audio.isMusicActive())))) return;
+        expectedWidth = width;
+        Log.i(TAG, "Detected display mode change from " + previous + " to " + width);
+        int initial = expectedUsb == -1 ? previous | Math.max(route, 0) : 0;
+        beginSwitch(target, new SwitchReadiness(initial), ++generation);
     }
 
     private void onAudioSwitch(int route, ForegroundTasks.Task atChange, boolean wasHome) {
@@ -122,11 +142,14 @@ final class PreparedSwitch {
             if (route == 1) finish("USB audio returned.");
             return;
         }
-        if (armed && automaticAudioSwitch()) {
-            if (route == expectedUsb) return;
+        if (armed && savedApp != null && (automaticSwitch() || revealing)) {
+            if (route == expectedUsb) {
+                if (usbUnconfirmed) confirmUsb(generation);
+                return;
+            }
+            usbUnconfirmed = false;
+            main.removeCallbacks(endUnconfirmedUsb);
             expectedUsb = route;
-            stableOutput = 0;
-            awaitingTap = false;
             beginSwitch(savedApp, new SwitchReadiness(0), ++generation);
             return;
         }
@@ -138,7 +161,6 @@ final class PreparedSwitch {
             beginHomeHandoff();
             return;
         }
-        if (route == 1 && atChange == null && tasks.evaForegroundAt() >= 0) atChange = enumeratingPlayer;
         if (atChange == null || !tasks.canReturnTo(atChange)) return;
         expectedUsb = route;
         Log.i(TAG, "Detected " + (route == 1 ? "USB" : "DP") + " audio switch in " + atChange.packageName);
@@ -149,7 +171,7 @@ final class PreparedSwitch {
         if (closed) return;
         ForegroundTasks.Task player = tasks.current();
         boolean home = tasks.evaForegroundAt() >= 0;
-        if ((home || (player != null && hasPlayer(player)))
+        if ((home || (player != null && (hasPlayer(player) || audio.isMusicActive())))
                 && Settings.canDrawOverlays(service) && service.getSystemService(PowerManager.class).isInteractive()) {
             Long token = GlassesCover.pendingDp(service, !home);
             if (token != null) {
@@ -229,28 +251,27 @@ final class PreparedSwitch {
     private void beginSwitch(ForegroundTasks.Task target, SwitchReadiness change, int request) {
         armed = true;
         paused = false;
+        revealing = false;
+        awaitingTap = false;
+        stableOutput = 0;
         if (savedApp != target) {
-            waitForPlayer = target == enumeratingPlayer || hasPlayer(target);
+            if (switchPlayer != null) switchPlayer.releaseFocus();
+            switchPlayer = new SwitchPlayer(service, audio, tasks, target);
+            waitForPlayer = switchPlayer.recognized();
         }
-        enumeratingPlayer = null;
-        main.removeCallbacks(clearUnconfirmedUsbCover);
-        pauseRequestedAt = -PAUSE_RETRY_MS;
-        pauseRequestedTo = null;
-        pauseKeySent = false;
-        pauseFocusTried = false;
         savedApp = target;
         readiness = change;
-        boolean automatic = automaticAudioSwitch();
+        boolean automatic = automaticSwitch();
+        service.stopService(new Intent(service, SilencePlayback.class));
         if (automatic) {
             if (waitForPlayer) {
                 coverScreen(false);
-                if (expectedUsb == 1) acknowledgeUsbCover(request);
+                if (expectedUsb == 1 && !usbUnconfirmed) acknowledgeUsbCover(request);
             } else {
                 clearScreen();
             }
-            pausePlayback(target);
+            if (waitForPlayer) switchPlayer.pause(true);
         }
-        service.stopService(new Intent(service, SilencePlayback.class));
         main.postDelayed(() -> {
             if (request != generation) return;
             if (!automatic) {
@@ -258,8 +279,11 @@ final class PreparedSwitch {
                     finish("The foreground app changed. Prepare the switch again in that app.");
                     return;
                 }
-                if (pausePlayback(target)) {
-                    waitForPause(request, SystemClock.elapsedRealtime() + 2500);
+                if (waitForPlayer || switchPlayer.active()) {
+                    waitForPlayer = true;
+                    coverScreen(true);
+                    main.postDelayed(() -> waitForPause(request, SystemClock.elapsedRealtime() + 2500),
+                            blackScreen == null ? 0 : FADE_MS);
                     return;
                 }
             }
@@ -269,13 +293,14 @@ final class PreparedSwitch {
 
     private void waitForPause(int request, long pauseDeadline) {
         if (request != generation) return;
-        int state = playerState(savedApp);
-        if (state == PlaybackState.STATE_PAUSED) {
+        if (savedApp != tasks.current()) {
+            finish("The foreground app changed. Prepare the switch again in that app.");
+        } else if (!switchPlayer.active() || switchPlayer.paused()) {
             waitForSwitch(request);
         } else if (SystemClock.elapsedRealtime() >= pauseDeadline) {
-            finish("Playback is still active. Pause it in the player before switching.");
+            finish("Playback is still active. Pause it in the player before switching.", false, true);
         } else {
-            if (state == PlaybackState.STATE_PLAYING) pausePlayback(savedApp);
+            switchPlayer.pause(false);
             main.postDelayed(() -> waitForPause(request, pauseDeadline), PAUSE_CHECK_MS);
         }
     }
@@ -283,8 +308,7 @@ final class PreparedSwitch {
     private void waitForSwitch(int request) {
         paused = true;
         deadline = SystemClock.elapsedRealtime() + (homeHandoffStartedAt != 0 ? HOME_HANDOFF_MS : ARM_MS);
-        if (!automaticAudioSwitch() && waitForPlayer) coverScreen(true);
-        service.showStatus(automaticAudioSwitch() ? "Waiting for the new audio route to settle."
+        service.showStatus(automaticSwitch() ? "Waiting for the display and audio route to settle."
                 : "Ready. Use the glasses button to switch now.", blackScreen == null);
         poll(request);
     }
@@ -292,18 +316,22 @@ final class PreparedSwitch {
     private void poll(int request) {
         if (request != generation) return;
         if (!checkDisplay()) return;
-        if (SystemClock.elapsedRealtime() >= deadline) {
-            finish("Switch wait ended.");
+        if (savedApp != null && !tasks.canReturnTo(savedApp)) {
+            finish("The saved app changed.");
             return;
         }
-        boolean pausePending = expectedUsb == 1 && waitForPlayer && !pauseFocusTried
-                && savedApp == tasks.current() && playerState(savedApp) == PlaybackState.STATE_PLAYING;
-        if (pausePending) pausePlayback(savedApp);
+        if (SystemClock.elapsedRealtime() >= deadline) {
+            finish("Switch wait ended.", false, true);
+            return;
+        }
+        boolean pausePending = pauseIfPlaying(request);
         reader.post(() -> {
             int currentOutput = output();
             main.post(() -> {
                 if (request != generation) return;
-                int candidate = expectedUsb == -1 || (currentOutput & 1) == expectedUsb ? currentOutput : 0;
+                int candidate = (expectedUsb == -1 || (currentOutput & 1) == expectedUsb)
+                        && (expectedWidth == 0 || (currentOutput & ~1) == expectedWidth) ? currentOutput : 0;
+                if (usbUnconfirmed && candidate != 0) confirmUsb(request);
                 if (readiness.ready(candidate, SystemClock.elapsedRealtime())) {
                     stableOutput = currentOutput;
                     Log.i(TAG, "New display mode and audio route settled");
@@ -316,8 +344,25 @@ final class PreparedSwitch {
         });
     }
 
+    private boolean pauseIfPlaying(int request) {
+        if (switchPlayer == null || !switchPlayer.active()) return false;
+        if (!waitForPlayer) {
+            waitForPlayer = true;
+            coverScreen(false);
+            if (expectedUsb == 1 && !usbUnconfirmed) acknowledgeUsbCover(request);
+        }
+        switchPlayer.pause(automaticSwitch());
+        return true;
+    }
+
+    private void confirmUsb(int request) {
+        usbUnconfirmed = false;
+        main.removeCallbacks(endUnconfirmedUsb);
+        acknowledgeUsbCover(request);
+    }
+
     void returnToApp(Activity activity) {
-        if (!armed || stableOutput == 0 || (activity != null && !awaitingTap)) {
+        if (!armed || revealing || stableOutput == 0 || (activity != null && !awaitingTap)) {
             if (activity != null) activity.finish();
             return;
         }
@@ -398,8 +443,7 @@ final class PreparedSwitch {
                         finish("The saved app changed.");
                     } else if (route != stableOutput) {
                         settleAgain(request);
-                    } else if (waitForPlayer ? playerReady(foregroundAt, now) : foregroundAt >= 0) {
-                        if (!waitForPlayer) pausePlayback(savedApp);
+                    } else if (waitForPlayer ? playerReady(request, foregroundAt, now) : foregroundAt >= 0) {
                         finishSettled();
                     } else if (waitForPlayer && now < readyBy) {
                         main.postDelayed(() -> confirmReturn(request, activity, readyBy), PAUSE_CHECK_MS);
@@ -407,7 +451,7 @@ final class PreparedSwitch {
                     } else if (activity == null && tasks.evaForegroundAt() >= 0) {
                         offerReturn(request);
                     } else if (foregroundAt >= 0) {
-                        finish("Could not confirm the player was paused. Check it before resuming.");
+                        finish("Could not confirm the player was paused.", (stableOutput & 1) == 0, true);
                     } else {
                         finish("Open the saved app when ready.");
                     }
@@ -418,7 +462,9 @@ final class PreparedSwitch {
     }
 
     private void settleAgain(int request) {
+        revealing = false;
         stableOutput = 0;
+        if (waitForPlayer) coverScreen(false);
         readiness.ready(0, SystemClock.elapsedRealtime());
         poll(request);
     }
@@ -434,46 +480,87 @@ final class PreparedSwitch {
 
     private void finishSettled() {
         Log.i(TAG, "Switch settled in " + savedApp.packageName);
-        finish("Switch settled. Continue in the app when ready.", (stableOutput & 1) == 0, true);
+        finish("Switch settled.", (stableOutput & 1) == 0, true);
     }
 
-    void finish(String status) {
+    void cancel() {
+        if (revealing) complete("Switch cancelled.", false, false);
+        else finish("Switch cancelled.", false, true);
+    }
+
+    private void finish(String status) {
         finish(status, false, false);
     }
 
     private void finish(String status, boolean displayPortSettled, boolean reveal) {
         if (!armed) return;
-        generation++;
-        main.removeCallbacksAndMessages(null);
+        if (!reveal) {
+            complete(status, displayPortSettled, false);
+            return;
+        }
+        if (revealing) return;
+        revealing = true;
+        int request = generation;
+        int expectedOutput = stableOutput;
+        Runnable completeFade = () -> {
+            if (request != generation || !checkDisplay()) return;
+            reader.post(() -> {
+                int route = output();
+                main.post(() -> {
+                    if (request != generation || !checkDisplay()) return;
+                    if (expectedOutput != 0 && expectedOutput != route && SystemClock.elapsedRealtime() < deadline) {
+                        settleAgain(request);
+                    } else {
+                        complete(status, displayPortSettled, route != 0 && (expectedOutput == 0 || expectedOutput == route));
+                    }
+                });
+            });
+        };
+        View cover = blackScreen;
+        if (cover != null) {
+            Log.i(TAG, "Fading out the black cover over " + FADE_MS + " ms");
+            cover.animate().alpha(0f).setDuration(FADE_MS)
+                    .withEndAction(() -> afterCoverFrame(request, 0f, completeFade));
+        } else {
+            completeFade.run();
+        }
+    }
+
+    private void complete(String status, boolean displayPortSettled, boolean resume) {
+        int request = ++generation;
+        main.removeCallbacks(endUnconfirmedUsb);
         armed = false;
         paused = false;
+        revealing = false;
         awaitingTap = false;
         stableOutput = 0;
-        boolean home = homeHandoffStartedAt != 0;
         homeHandoffStartedAt = 0;
         expectedUsb = -1;
-        savedApp = null;
-        enumeratingPlayer = null;
-        Log.i(TAG, status);
+        expectedWidth = 0;
+        usbUnconfirmed = false;
         boolean covered = blackScreen != null;
-        if (reveal && covered) {
-            Log.i(TAG, (home ? "Beam Home fully drawn." : "Player paused.") + " Fading in over " + FADE_MS + " ms");
-            View cover = blackScreen;
-            cover.animate().alpha(0f).setDuration(FADE_MS).withEndAction(() -> cover.postOnAnimation(() -> {
-                if (blackScreen == cover && cover.getAlpha() == 0f) clearScreen();
-            }));
-        } else {
-            clearScreen();
+        clearScreen();
+        if (switchPlayer != null) {
+            if (resume && tasks.current() == savedApp) {
+                switchPlayer.resume(main, () -> request == generation && checkDisplay());
+            } else {
+                switchPlayer.releaseFocus();
+            }
         }
-        service.showStatus(status, !reveal || !covered);
+        switchPlayer = null;
+        savedApp = null;
+        Log.i(TAG, status);
+        service.showStatus(status, !covered);
         SilencePlayback.startIfEnabled(service, displayPortSettled);
     }
 
     void close() {
         generation++;
         closed = true;
+        displays.unregisterDisplayListener(this);
         main.removeCallbacksAndMessages(null);
         clearScreen();
+        if (switchPlayer != null) switchPlayer.releaseFocus();
         reader.removeCallbacksAndMessages(null);
         thread.quitSafely();
         synchronized (tasks) {
@@ -494,17 +581,27 @@ final class PreparedSwitch {
     }
 
     private void afterCoverCommit(int request, String route, Runnable acknowledgement) {
+        if (Build.VERSION.SDK_INT < 29) return;
+        afterCoverFrame(request, 1f, () -> {
+            Log.i(TAG, "Black cover frame committed for " + route + " handoff");
+            reader.post(acknowledgement);
+        });
+    }
+
+    private void afterCoverFrame(int request, float alpha, Runnable action) {
         View cover = blackScreen;
-        if (cover == null || Build.VERSION.SDK_INT < 29) return;
+        if (cover == null) return;
         cover.post(() -> {
-            if (request != generation || cover != blackScreen || cover.getAlpha() != 1f) return;
-            cover.getViewTreeObserver().registerFrameCommitCallback(() -> cover.postOnAnimation(() -> {
-                if (request == generation && cover == blackScreen && cover.getAlpha() == 1f) {
-                    Log.i(TAG, "Black cover frame committed for " + route + " handoff");
-                    reader.post(acknowledgement);
-                }
-            }));
-            cover.invalidate();
+            if (request != generation || cover != blackScreen || cover.getAlpha() != alpha) return;
+            Runnable afterFrame = () -> cover.postOnAnimation(() -> {
+                if (request == generation && cover == blackScreen && cover.getAlpha() == alpha) action.run();
+            });
+            if (Build.VERSION.SDK_INT >= 29) {
+                cover.getViewTreeObserver().registerFrameCommitCallback(afterFrame);
+                cover.invalidate();
+            } else {
+                afterFrame.run();
+            }
         });
     }
 
@@ -549,32 +646,27 @@ final class PreparedSwitch {
                 || (PlayerAccess.granted(service) && PlayerAccess.hasSession(service, target.packageName));
     }
 
-    private int playerState(ForegroundTasks.Task target) {
-        if (PlayerAccess.granted(service)) {
-            MediaController player = PlayerAccess.session(service, target.packageName, false);
-            PlaybackState state = player == null ? null : player.getPlaybackState();
-            if (state != null) return state.getState();
-        }
-        return ForegroundTasks.VLC.equals(target.component) ? tasks.vlcPlaybackState() : -1;
-    }
-
-    private boolean playerReady(long foregroundAt, long now) {
-        int state = foregroundAt >= 0 && System.currentTimeMillis() - foregroundAt >= APP_REOPEN_MS
-                ? playerState(savedApp) : -1;
-        if (state == PlaybackState.STATE_PLAYING) pausePlayback(savedApp);
-        return readiness.playerReady(stableOutput, state == PlaybackState.STATE_PAUSED, now);
+    private boolean playerReady(int request, long foregroundAt, long now) {
+        pauseIfPlaying(request);
+        boolean ready = foregroundAt >= 0 && System.currentTimeMillis() - foregroundAt >= APP_REOPEN_MS;
+        return readiness.playerReady(stableOutput, ready && switchPlayer.paused(), now);
     }
 
     private int output() {
         int width = ModeAudioRecovery.modeWidth(displays);
         if (width == 0 || !SilencePlayback.GLASSES_PORT_PARTNER.exists() || !SilencePlayback.readDpLink()) return 0;
+        int route = audioRoute();
+        return route < 0 ? 0 : width | route;
+    }
+
+    private int audioRoute() {
         boolean usb = false;
         boolean speaker = false;
         for (AudioDeviceInfo device : audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
             switch (device.getType()) {
                 case AudioDeviceInfo.TYPE_USB_DEVICE:
                 case AudioDeviceInfo.TYPE_USB_HEADSET:
-                    if (!device.getProductName().toString().contains("XREAL")) return 0;
+                    if (!device.getProductName().toString().contains("XREAL")) return -1;
                     usb = true;
                     break;
                 case AudioDeviceInfo.TYPE_USB_ACCESSORY:
@@ -582,59 +674,13 @@ final class PreparedSwitch {
                 case AudioDeviceInfo.TYPE_HEARING_AID:
                 case AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
                 case AudioDeviceInfo.TYPE_WIRED_HEADSET:
-                    return 0;
+                    return -1;
                 case AudioDeviceInfo.TYPE_BUILTIN_SPEAKER:
                     speaker = true;
                     break;
             }
         }
-        return usb ? width + 1 : speaker ? width : 0;
-    }
-
-    private boolean pausePlayback(ForegroundTasks.Task target) {
-        long now = SystemClock.elapsedRealtime();
-        if (target != tasks.current()) return false;
-        if (PlayerAccess.granted(service)) {
-            MediaController player = PlayerAccess.playing(service, target.packageName);
-            if (player == null) return false;
-            MediaSession.Token session = player.getSessionToken();
-            boolean sameSession = session.equals(pauseRequestedTo);
-            boolean fallback = sameSession && (!pauseKeySent || (expectedUsb == 1 && !pauseFocusTried))
-                    && PlayerAccess.isOnlySession(service, session);
-            if (now - pauseRequestedAt < (fallback ? PAUSE_CHECK_MS : PAUSE_RETRY_MS)) return false;
-            if (fallback && !pauseKeySent) {
-                pauseKeySent = true;
-                dispatchPauseKey();
-                Log.i(TAG, "Sent fallback media Pause key to " + target.packageName);
-            } else if (fallback) {
-                pauseFocusTried = true;
-                // A transient focus loss lets the player resume when we release focus.
-                if (audio.requestAudioFocus(pauseFocus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
-                    audio.abandonAudioFocusRequest(pauseFocus);
-                    Log.i(TAG, "Requested Pause via audio focus in " + target.packageName);
-                }
-            } else {
-                if (!sameSession) {
-                    pauseKeySent = false;
-                    pauseFocusTried = false;
-                }
-                player.getTransportControls().pause();
-                pauseRequestedTo = session;
-                Log.i(TAG, "Requested Pause in " + target.packageName);
-            }
-        } else {
-            if (now - pauseRequestedAt < PAUSE_RETRY_MS || !ForegroundTasks.VLC.equals(target.component)
-                    || tasks.vlcPlaybackState() != PlaybackState.STATE_PLAYING) return false;
-            dispatchPauseKey();
-            Log.i(TAG, "Requested Pause in " + target.packageName);
-        }
-        pauseRequestedAt = now;
-        return true;
-    }
-
-    private void dispatchPauseKey() {
-        audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PAUSE));
-        audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PAUSE));
+        return usb ? 1 : speaker ? 0 : -1;
     }
 
     private void startLogMonitor() {

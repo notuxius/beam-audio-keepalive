@@ -69,7 +69,8 @@ public final class ModeAudioRecovery extends Service implements DisplayManager.D
         if (width == 0 || width == lastWidth) return;
         int previousWidth = lastWidth;
         lastWidth = width;
-        if (previousWidth == 0 || PlaybackProtection.switchArmed()) return;
+        PreparedSwitch preparation = PlaybackProtection.preparation;
+        if (previousWidth == 0 || (preparation != null && preparation.handlesModeSwitch())) return;
 
         for (AudioDeviceInfo device : audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)) {
             if (device.getType() == AudioDeviceInfo.TYPE_USB_HEADSET

@@ -109,10 +109,17 @@ public final class Controls extends Activity {
                 }
                 if (!PlayerAccess.granted(this)) {
                     Button allowPause = new Button(this);
-                    allowPause.setText("Allow Pause in other players");
+                    allowPause.setText("Allow automatic pause and resume");
                     allowPause.setOnClickListener(view -> startActivity(new Intent(
                             Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)));
                     troubleshooting.addView(allowPause);
+                }
+                if (!PlayerControls.enabled(this)) {
+                    Button allowPlayButton = new Button(this);
+                    allowPlayButton.setText("Allow accessibility playback fallback");
+                    allowPlayButton.setOnClickListener(view -> startActivity(new Intent(
+                            Settings.ACTION_ACCESSIBILITY_SETTINGS)));
+                    troubleshooting.addView(allowPlayButton);
                 }
             }
 

@@ -23,7 +23,7 @@ public final class PrepareSwitchTile extends TileService {
                 : armed ? Tile.STATE_ACTIVE : Tile.STATE_INACTIVE);
         tile.setLabel(returning ? "Return to app" : armed ? "Cancel switch" : "Prepare switch");
         if (android.os.Build.VERSION.SDK_INT >= 29) {
-            String paused = armed && preparation.automaticAudioSwitch() ? "Waiting for audio" : "Ready. Switch now.";
+            String paused = armed && preparation.automaticSwitch() ? "Waiting for switch" : "Ready. Switch now.";
             tile.setSubtitle(armed && !returning ? (preparation.paused() ? paused : "Preparing…") : null);
         }
         tile.updateTile();

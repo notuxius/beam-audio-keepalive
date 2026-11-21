@@ -70,7 +70,7 @@ public final class PlaybackProtection extends Service {
         }
         String action = intent == null ? null : intent.getAction();
         if (PREPARE.equals(action)) preparation.prepare();
-        if (CANCEL.equals(action)) preparation.finish("Switch cancelled.");
+        if (CANCEL.equals(action)) preparation.cancel();
         return START_STICKY;
     }
 

@@ -1,7 +1,10 @@
 package local.xreal.beamaudiokeepalive;
 
+import android.media.session.PlaybackState;
+
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.regex.Pattern;
 
 public final class PreparedSwitchTest {
     public static void main(String[] args) {
@@ -32,6 +35,33 @@ public final class PreparedSwitchTest {
         verifySwitch(3840, 1920);
         verifySwitch(1920, 1921);
         verifySwitch(1921, 1920);
+        verifySwitch(1921, 3841);
+        verifySwitch(3841, 1921);
+        verifySwitch(3840, 3841);
+        verifySwitch(3841, 3840);
+        assert new SwitchReadiness(1921).playerReady(3841, true, 100);
+        assert new SwitchReadiness(3841).playerReady(1921, true, 100);
+        assert !new SwitchReadiness(3840).playerReady(3841, true, 100);
+
+        assert PlayerAccess.sameMedia(true, null, null);
+        assert !PlayerAccess.sameMedia(false, null, null);
+        assert PlayerAccess.sameMedia(false, "uri:movie", "uri:movie");
+        assert !PlayerAccess.sameMedia(true, "uri:movie", "uri:different");
+        assert !PlayerAccess.sameMedia(true, "uri:movie", null);
+
+        Pattern play = PlayerControls.playLabelPattern(null);
+        assert PlayerControls.matchesPlayLabel(play, "  PLAY video ", null);
+        assert PlayerControls.matchesPlayLabel(play, null, "Resume playback");
+        assert !PlayerControls.matchesPlayLabel(play, "Pause", "Play");
+        assert !PlayerControls.matchesPlayLabel(play, "Play next", null);
+        assert !PlayerControls.matchesPlayLabel(play, "Replay", null);
+        assert !PlayerControls.matchesPlayLabel(play, null, null);
+        Pattern localizedPlay = PlayerControls.playLabelPattern("Lire (vid\u00e9o)");
+        assert PlayerControls.matchesPlayLabel(localizedPlay, "LIRE (VID\u00c9O)", null);
+        assert !PlayerControls.matchesPlayLabel(localizedPlay, "Lire vid\u00e9o", null);
+        assert PlayerControls.isUnlabeledMxPlayButton("com.mxtech.videoplayer.ad:id/playpause", null, "");
+        assert !PlayerControls.isUnlabeledMxPlayButton("com.mxtech.videoplayer.ad:id/playpause", "Pause", null);
+        assert !PlayerControls.isUnlabeledMxPlayButton("org.example.player:id/playpause", null, "");
 
         SwitchReadiness unstable = new SwitchReadiness(1920);
         assert !unstable.ready(1921, 100);
@@ -47,11 +77,11 @@ public final class PreparedSwitchTest {
         assert !unstable.ready(0, 14101);
         assert !unstable.playerReady(1921, true, 14102);
         assert new SwitchReadiness(1921).playerReady(1920, true, 100);
-        assert new SwitchReadiness(1921).playerReady(3841, true, 100);
         assert !new SwitchReadiness(0).playerReady(1921, true, 100);
 
         verifyTask(ForegroundTasks.VLC);
         verifyTask("org.example.player/.Playback");
+        verifyMxPlayback();
         ForegroundTasks tasks = new ForegroundTasks();
         tasks.accept("1000.000 442 568 I wm_set_resumed_activity: [0," + ForegroundTasks.EVA + ",start]");
         tasks.accept("1000.200 442 568 I ActivityTaskManager: Displayed " + ForegroundTasks.EVA + ": +200ms");
@@ -81,6 +111,39 @@ public final class PreparedSwitchTest {
         assert tasks.vlcPlaybackState() == 2;
         tasks.accept("I/am_proc_died(442): [0,8218,org.videolan.vlc,500,10]");
         assert tasks.vlcPlaybackState() == -1;
+    }
+
+    private static void verifyMxPlayback() {
+        ForegroundTasks tasks = new ForegroundTasks();
+        String component = ForegroundTasks.MX_PLAYER;
+        String media = "file:///storage/emulated/0/Download/movie.mp4";
+        foreground(tasks, component);
+        tasks.accept("1012.310 442 568 I wm_resume_activity: [0,25000899,31," + component + "]");
+        ForegroundTasks.Task saved = tasks.current();
+        String screen = " V MX.Screen: ";
+        String activity = " (com.mxtech.videoplayer.ad.ActivityScreen@9627760): uri=";
+        tasks.accept("1012.320 17794 17794" + screen + "onResume" + activity + media);
+        assert media.equals(tasks.mxMedia(saved));
+        assert tasks.mxPlaybackState(saved, media) == -1;
+        tasks.accept("1012.330 17794 17794 V MX.Player.Joint: Start [1]. 1=8699 2=0 ex=null");
+        assert tasks.mxPlaybackState(saved, media) == PlaybackState.STATE_PLAYING;
+        tasks.accept("1012.340 11111 11111 V MX.Player.Joint: Pause [1]. 1=18452 2=0 ex=null");
+        assert tasks.mxPlaybackState(saved, media) == PlaybackState.STATE_PLAYING;
+        tasks.accept("1012.350 17794 17794 V MX.Player.Joint: Pause [1]. 1=18452 2=0 ex=null");
+        foreground(tasks, ForegroundTasks.EVA);
+        foreground(tasks, component);
+        tasks.accept("1018.120 17794 17794" + screen + "onResume" + activity + media);
+        assert tasks.current() == saved;
+        assert tasks.mxPlaybackState(saved, media) == PlaybackState.STATE_PAUSED;
+        tasks.accept("1018.130 17794 17794 V MX.Player.Joint: Start [1]. 1=18452 2=0 ex=java.lang.Exception");
+        assert tasks.mxPlaybackState(saved, media) == PlaybackState.STATE_PAUSED;
+        tasks.accept("1018.140 17794 17794 V MX.Player.Joint: Start [1]. 1=18452 2=0 ex=null");
+        assert tasks.mxPlaybackState(saved, media) == PlaybackState.STATE_PLAYING;
+        tasks.accept("1018.150 17794 17794" + screen + "onResume" + activity + media + ".other");
+        assert tasks.mxPlaybackState(saved, media) == -1;
+        assert tasks.mxPlaybackState(saved, media + ".other") == -1;
+        tasks.accept("1018.160 442 568 I am_proc_died: [0,17794," + saved.packageName + ",500,10]");
+        assert !tasks.canReturnTo(saved);
     }
 
     private static void verifyTask(String component) {

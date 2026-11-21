@@ -28,15 +28,17 @@ In a separate test, VLC was paused before switching from DisplayPort to USB and 
 
 With Playback Protection enabled on OS 384, add **Prepare switch** to Android Quick Settings. Open an app, tap the tile, and wait for **Ready. Switch now.** before using the glasses button. The tile works for 2D/3D and USB/DisplayPort switches in either direction. Keepalive uses Beam log access to find the foreground app and verify that its original activity is still open.
 
-Keepalive waits for the new display mode and audio route to stay stable for 4.5 seconds. If EVA takes focus, Keepalive brings the saved app back. If Android blocks the return, tap **Return to app** in Quick Settings. Press Play yourself when ready.
+Keepalive waits for the new display mode and audio route to stay stable for 4.5 seconds. If EVA takes focus, Keepalive brings the saved app back. If Android blocks the return, tap **Return to app** in Quick Settings.
 
-Playback Protection automatically handles Air 2 Pro USB/DisplayPort audio switches. To let Keepalive send Pause to the foreground player's Android media session, open **Show troubleshooting → Allow Pause in other players** and grant Android Notification access. If the player keeps playing after the Pause request and has the only active media session, Keepalive tries Android's media Pause key. Without the grant, Keepalive still returns apps to the foreground and can pause VLC using its existing fallback.
+Playback Protection handles Air 2 Pro USB/DisplayPort switches in 2D and 3D and 2D/3D switches on either audio route. Use **Show troubleshooting → Allow automatic pause and resume** to grant Android Notification access so Keepalive can send Pause and Play to the player's media session. It can also send dedicated media keys to the same session. Players without usable session controls can pause and resume by responding to transient audio focus.
 
-For automatic return after EVA takes focus, open **Show troubleshooting → Allow automatic return to apps** and grant **Display over other apps** to Keepalive. This lets Keepalive bring the saved task forward after the route and EVA settle.
+For automatic return and the black cover, open **Show troubleshooting → Allow automatic return to apps** and grant **Display over other apps** to Keepalive.
 
-With that grant, Keepalive can cover VLC and other players with an active Android media session when notification access is enabled. It keeps the cover up while a recognized player reopens its session. **Prepare switch** fades to black as the switch becomes ready. Automatic audio recovery covers the screen when the route change is detected. Once the saved player is back and reports **Paused**, Keepalive fades it in over 400 ms. Cancel, disconnect, or a timeout clears the cover.
+To let Keepalive use a player’s on-screen Play button, open **Show troubleshooting → Allow accessibility playback fallback** and enable **Beam Keepalive Play button** in Android Accessibility. If the saved video is still paused after the fade and the media commands, Keepalive looks in the saved player’s window for one visible control labeled Play or Resume. It also recognizes the player’s translated Play label when available. A brief popup announces the attempt. Another popup appears if Keepalive can’t identify or press the button, or can’t confirm that playback resumed.
 
-When switching from DisplayPort to USB audio, Keepalive can cover the player during USB enumeration. If the media Pause key has no effect and the player has the only active session, Keepalive briefly requests audio focus to stop playback. After the route settles, it waits for the player to stay foreground and paused for 2.5 seconds before starting the fade.
+MX Player 3.5.3 leaves its media session state empty. Keepalive uses its playback logs to verify the same video was playing before the switch and is still paused after the fade. It can then use MX Player’s unlabeled Play/Pause button.
+
+**Prepare switch** fades to black before pausing. Automatic switches cover the player when Keepalive detects the change. Once the player is back and playback is paused, Keepalive fades out the black cover over 400 ms. It then resumes the same media if it was playing before the switch. A video already paused stays paused. The DP-to-USB switch also waits for the player to stay foreground and paused for 2.5 seconds before the fade. Cancel, disconnect, or a timeout clears the cover.
 
 ## Optional boot video recovery
 
