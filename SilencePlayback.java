@@ -12,6 +12,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.hardware.display.DisplayManager;
 import android.media.AudioAttributes;
 import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
@@ -28,6 +29,7 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.Display;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -35,7 +37,7 @@ import java.io.IOException;
 import java.io.InputStreamReader;
 import java.util.List;
 
-public final class SilencePlayback extends Service {
+public final class SilencePlayback extends Service implements DisplayManager.DisplayListener {
     private static final String TAG = "BeamAudioKeepalive";
     private static final String CHANNEL = "playback";
     private static final String STOP = "stop";
@@ -43,6 +45,7 @@ public final class SilencePlayback extends Service {
     private static final String DP_SETTLED = "dp_settled";
     private static final int SAMPLE_RATE = 48000;
     private static final long POLL_MS = 500;
+    private static final long STABLE_POLL_MS = 2000;
     // shortcut: this stock Beam's mixer enters standby 3 s after its last track stops.
     private static final long AUDIO_IDLE_MS = 4000;
     // The Air 2 Pro can drop and retrain its first link while selecting DP audio.
@@ -58,6 +61,7 @@ public final class SilencePlayback extends Service {
     private HandlerThread readerThread;
     private Handler reader;
     private AudioManager audio;
+    private DisplayManager displays;
     private PowerManager power;
     private AudioFocusRequest focus;
     private boolean automatic;
@@ -69,6 +73,9 @@ public final class SilencePlayback extends Service {
     private long focusDeadline;
     private long pluggedSince = -1;
     private long quietSince = -1;
+    private long fastPollUntil;
+    private boolean linkCheckRunning;
+    private boolean linkCheckRequested;
     private int generation;
     private String status;
     private AudioTrack track;
@@ -124,12 +131,12 @@ public final class SilencePlayback extends Service {
     private final AudioDeviceCallback devices = new AudioDeviceCallback() {
         @Override
         public void onAudioDevicesAdded(AudioDeviceInfo[] added) {
-            if (automatic) updateAutomaticPlayback();
+            onAudioDevicesChanged();
         }
 
         @Override
         public void onAudioDevicesRemoved(AudioDeviceInfo[] removed) {
-            if (automatic) updateAutomaticPlayback();
+            onAudioDevicesChanged();
         }
     };
 
@@ -154,6 +161,7 @@ public final class SilencePlayback extends Service {
         releaseTrack();
         showStatus("Waiting for DisplayPort audio");
         audio = getSystemService(AudioManager.class);
+        displays = getSystemService(DisplayManager.class);
         power = getSystemService(PowerManager.class);
         focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
                 .setAudioAttributes(mediaAttributes())
@@ -169,35 +177,72 @@ public final class SilencePlayback extends Service {
         screenEvents.addAction(Intent.ACTION_SCREEN_OFF);
         registerReceiver(screen, screenEvents);
         audio.registerAudioDeviceCallback(devices, main);
+        displays.registerDisplayListener(this, main);
         restartLinkCheck();
+    }
+
+    private void onAudioDevicesChanged() {
+        if (!automatic) return;
+        updateAutomaticPlayback();
+        requestLinkCheck();
+    }
+
+    @Override public void onDisplayAdded(int id) { onDisplayChanged(id); }
+
+    @Override public void onDisplayRemoved(int id) { onDisplayChanged(id); }
+
+    @Override public void onDisplayChanged(int id) {
+        if (id == Display.DEFAULT_DISPLAY) requestLinkCheck();
     }
 
     private void restartLinkCheck() {
         if (!automatic) return;
         generation++;
-        main.removeCallbacks(poll);
         linkConnected = false;
         pluggedSince = -1;
         quietSince = -1;
         updateAutomaticPlayback();
-        if (power.isInteractive()) main.post(poll);
+        requestLinkCheck();
+    }
+
+    private void requestLinkCheck() {
+        main.removeCallbacks(poll);
+        if (!automatic || !power.isInteractive()) return;
+        fastPollUntil = SystemClock.elapsedRealtime() + ATTACH_SETTLE_MS;
+        if (linkCheckRunning) linkCheckRequested = true;
+        else main.post(poll);
     }
 
     private void pollLink() {
         if (!automatic || !power.isInteractive()) return;
+        linkCheckRunning = true;
         int request = generation;
         reader.post(() -> {
             boolean plugged = GLASSES_PORT_PARTNER.exists();
             boolean connected = plugged && readDpLink();
-            main.post(() -> {
-                if (!automatic || request != generation) return;
-                if (!plugged) pluggedSince = -1;
-                else if (pluggedSince < 0) pluggedSince = SystemClock.elapsedRealtime();
-                linkConnected = connected;
-                updateAutomaticPlayback();
-                main.postDelayed(poll, POLL_MS);
-            });
+            main.post(() -> finishLinkCheck(request, plugged, connected));
         });
+    }
+
+    private void finishLinkCheck(int request, boolean plugged, boolean connected) {
+        linkCheckRunning = false;
+        boolean recheck = linkCheckRequested || request != generation;
+        linkCheckRequested = false;
+        if (!automatic || !power.isInteractive()) return;
+        long now = SystemClock.elapsedRealtime();
+        if (request == generation) {
+            if (!plugged) pluggedSince = -1;
+            else if (pluggedSince < 0) pluggedSince = now;
+            linkConnected = connected;
+            updateAutomaticPlayback();
+        }
+        boolean recovering = eligible && (track == null || holdingFocus);
+        main.postDelayed(poll, recheck ? 0 : linkPollDelay(now, fastPollUntil, pluggedSince, recovering));
+    }
+
+    static long linkPollDelay(long now, long fastUntil, long pluggedSince, boolean recovering) {
+        boolean attaching = pluggedSince >= 0 && now - pluggedSince < ATTACH_SETTLE_MS;
+        return now < fastUntil || attaching || recovering ? POLL_MS : STABLE_POLL_MS;
     }
 
     static boolean readDpLink() {
@@ -357,6 +402,7 @@ public final class SilencePlayback extends Service {
         generation++;
         main.removeCallbacks(poll);
         audio.unregisterAudioDeviceCallback(devices);
+        displays.unregisterDisplayListener(this);
         unregisterReceiver(screen);
         readerThread.quitSafely();
         eligible = false;

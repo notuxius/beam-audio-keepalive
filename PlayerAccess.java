@@ -8,6 +8,7 @@ import android.media.session.MediaController;
 import android.media.session.MediaSession;
 import android.media.session.MediaSessionManager;
 import android.media.session.PlaybackState;
+import android.net.Uri;
 import android.service.notification.NotificationListenerService;
 import android.util.Log;
 import android.view.KeyEvent;
@@ -76,7 +77,22 @@ public final class PlayerAccess extends NotificationListenerService {
         return title != null && !title.isEmpty() && duration > 0 ? "title:" + title + ":" + duration : null;
     }
 
-    static boolean sameMedia(boolean sameSession, String before, String after) {
+    static String activeQueueUri(MediaController player) {
+        PlaybackState state = player.getPlaybackState();
+        if (state == null || state.getActiveQueueItemId() == MediaSession.QueueItem.UNKNOWN_ID) return null;
+        List<MediaSession.QueueItem> queue = player.getQueue();
+        if (queue == null) return null;
+        for (MediaSession.QueueItem item : queue) {
+            if (item.getQueueId() != state.getActiveQueueItemId()) continue;
+            Uri uri = item.getDescription().getMediaUri();
+            return uri == null || Uri.EMPTY.equals(uri) ? null : uri.toString();
+        }
+        return null;
+    }
+
+    static boolean sameMedia(boolean sameSession, String before, String after,
+            String beforeQueueUri, String afterQueueUri) {
+        if (beforeQueueUri != null && afterQueueUri != null) return beforeQueueUri.equals(afterQueueUri);
         if (before == null || after == null) return sameSession && before == null && after == null;
         return before.equals(after);
     }

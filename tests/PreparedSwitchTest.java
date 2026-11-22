@@ -43,11 +43,16 @@ public final class PreparedSwitchTest {
         assert new SwitchReadiness(3841).playerReady(1921, true, 100);
         assert !new SwitchReadiness(3840).playerReady(3841, true, 100);
 
-        assert PlayerAccess.sameMedia(true, null, null);
-        assert !PlayerAccess.sameMedia(false, null, null);
-        assert PlayerAccess.sameMedia(false, "uri:movie", "uri:movie");
-        assert !PlayerAccess.sameMedia(true, "uri:movie", "uri:different");
-        assert !PlayerAccess.sameMedia(true, "uri:movie", null);
+        assert PlayerAccess.sameMedia(true, null, null, null, null);
+        assert !PlayerAccess.sameMedia(false, null, null, null, null);
+        assert PlayerAccess.sameMedia(false, "uri:movie", "uri:movie", null, null);
+        assert !PlayerAccess.sameMedia(true, "uri:movie", "uri:different", null, null);
+        assert !PlayerAccess.sameMedia(true, "uri:movie", null, null, null);
+
+        String movie = "file:///movies/example.mp4";
+        assert PlayerAccess.sameMedia(false, "id:media/42", "id:media/0", movie, movie);
+        assert !PlayerAccess.sameMedia(true, "id:media/0", "id:media/0", movie, "file:///movies/other.mp4");
+        assert PlayerAccess.sameMedia(true, "id:media/42", "id:media/42", movie, null);
 
         Pattern play = PlayerControls.playLabelPattern(null);
         assert PlayerControls.matchesPlayLabel(play, "  PLAY video ", null);

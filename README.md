@@ -12,6 +12,12 @@ adb install -r beam-audio-keepalive.apk
 
 Open the app once, enable **Auto Keepalive**, and use **Done** to close settings. The app starts Auto Keepalive after reboot while the setting is enabled. If you deliberately force-stop the app, open it again to let Android resume delivering its boot event.
 
+## 2D/3D recovery with audio standby
+
+If you only need sound restored after a 2D/3D switch, turn off **Auto Keepalive**, then open **Show troubleshooting → Start 2D/3D audio recovery**. Recovery briefly pauses playback during a mode change so the Beam can reopen the audio output. It relies on the player responding to Android audio focus. The DisplayPort audio output can enter standby between plays, and the standby click may return. Start recovery again after reboot.
+
+To compare battery use on Beam OS 384, use Wi-Fi ADB with the Beam on battery. Compare the previous build with Auto Keepalive, the updated build with Auto Keepalive, and the updated build with only 2D/3D recovery. Keep the same glasses, DP mode, brightness, foreground app, playback state, and Playback Protection setting across runs. After the output settles, take repeated readings from `/sys/class/power_supply/battery/current_now` and `voltage_now` on the Beam. The readings are in microamps and microvolts. Repeat the runs to check how much the averages vary. Separately verify audio after standby, cable reconnect, screen wake, and switches in both directions.
+
 ## Optional Playback Protection
 
 On the original Beam running OS 384, open **Show troubleshooting → Turn on Playback Protection**. This setting is off by default, persists across reboots, and works with or without Auto Keepalive and 2D/3D audio recovery.

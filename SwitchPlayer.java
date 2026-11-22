@@ -28,6 +28,7 @@ final class SwitchPlayer {
     private final String mxMedia;
     private final MediaSession.Token originalSession;
     private final String originalMedia;
+    private final String originalQueueUri;
     private final boolean wasPlaying;
     private final AudioFocusRequest focus = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
             .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build())
@@ -48,6 +49,8 @@ final class SwitchPlayer {
                 ? PlayerAccess.session(context, target.packageName, null) : null;
         originalSession = controller == null ? null : controller.getSessionToken();
         originalMedia = controller == null ? null : PlayerAccess.mediaIdentity(controller);
+        // VLC can assign a different library ID when its video activity reopens the same file.
+        originalQueueUri = vlc && controller != null ? PlayerAccess.activeQueueUri(controller) : null;
         mxMedia = originalSession == null && ForegroundTasks.MX_PLAYER.equals(target.component)
                 ? tasks.mxMedia(target) : null;
         wasPlaying = PlayerAccess.playing(mxMedia == null ? PlayerAccess.state(controller)
@@ -60,7 +63,8 @@ final class SwitchPlayer {
         MediaController player = PlayerAccess.session(context, target.packageName, originalSession);
         if (player == null || originalSession == null) return player;
         return PlayerAccess.sameMedia(originalSession.equals(player.getSessionToken()),
-                originalMedia, PlayerAccess.mediaIdentity(player)) ? player : null;
+                originalMedia, PlayerAccess.mediaIdentity(player), originalQueueUri,
+                originalQueueUri == null ? null : PlayerAccess.activeQueueUri(player)) ? player : null;
     }
 
     boolean recognized() {
@@ -131,7 +135,11 @@ final class SwitchPlayer {
     void resume(Handler main, BooleanSupplier sameSwitch) {
         boolean releasedFocus = holdingFocus;
         releaseFocus();
-        if (!wasPlaying || tasks.current() != target) return;
+        if (tasks.current() != target) return;
+        if (!wasPlaying) {
+            Log.i(TAG, "Playback was not active before the switch in " + target.packageName);
+            return;
+        }
         if (mxMedia != null) {
             main.postDelayed(() -> {
                 BooleanSupplier stillPaused = () -> sameSwitch.getAsBoolean() && tasks.current() == target
@@ -140,31 +148,36 @@ final class SwitchPlayer {
             }, RESUME_CHECK_MS);
             return;
         }
+        if (releasedFocus) main.postDelayed(() -> resumeSession(main, sameSwitch), RESUME_CHECK_MS);
+        else resumeSession(main, sameSwitch);
+    }
+
+    private void resumeSession(Handler main, BooleanSupplier sameSwitch) {
+        if (!sameSwitch.getAsBoolean() || tasks.current() != target) return;
         MediaController player = controller();
-        PlaybackState state = player == null ? null : player.getPlaybackState();
+        if (player == null) {
+            Log.i(TAG, "Saved media session unavailable after the fade in " + target.packageName);
+            return;
+        }
+        PlaybackState state = player.getPlaybackState();
         if (state == null || state.getState() != PlaybackState.STATE_PAUSED) return;
         long pausedAt = state.getLastPositionUpdateTime();
-        Runnable play = () -> {
+        player.getTransportControls().play();
+        Log.i(TAG, "Requested Play after the fade in " + target.packageName);
+        main.postDelayed(() -> {
             if (!stillPaused(sameSwitch, player, pausedAt)) return;
-            player.getTransportControls().play();
-            Log.i(TAG, "Requested Play after the fade in " + target.packageName);
+            PlayerAccess.sendKey(player, KeyEvent.KEYCODE_MEDIA_PLAY);
+            Log.i(TAG, "Sent media Play key to " + target.packageName);
             main.postDelayed(() -> {
-                if (!stillPaused(sameSwitch, player, pausedAt)) return;
-                PlayerAccess.sendKey(player, KeyEvent.KEYCODE_MEDIA_PLAY);
-                Log.i(TAG, "Sent media Play key to " + target.packageName);
-                main.postDelayed(() -> {
-                    BooleanSupplier stillPaused = () -> stillPaused(sameSwitch, player, pausedAt);
-                    if (!stillPaused.getAsBoolean() || accessibilityPlay(main, sameSwitch, stillPaused, false)
-                            || !stillPaused.getAsBoolean()) return;
-                    if (!PlayerAccess.isOnlySession(context, player.getSessionToken())) return;
-                    audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PLAY));
-                    audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PLAY));
-                    Log.i(TAG, "Sent system Play key for the only active session in " + target.packageName);
-                }, RESUME_CHECK_MS);
+                BooleanSupplier stillPaused = () -> stillPaused(sameSwitch, player, pausedAt);
+                if (!stillPaused.getAsBoolean() || accessibilityPlay(main, sameSwitch, stillPaused, false)
+                        || !stillPaused.getAsBoolean()) return;
+                if (!PlayerAccess.isOnlySession(context, player.getSessionToken())) return;
+                audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_MEDIA_PLAY));
+                audio.dispatchMediaKeyEvent(new KeyEvent(KeyEvent.ACTION_UP, KeyEvent.KEYCODE_MEDIA_PLAY));
+                Log.i(TAG, "Sent system Play key for the only active session in " + target.packageName);
             }, RESUME_CHECK_MS);
-        };
-        if (releasedFocus) main.postDelayed(play, RESUME_CHECK_MS);
-        else play.run();
+        }, RESUME_CHECK_MS);
     }
 
     private boolean accessibilityPlay(Handler main, BooleanSupplier sameSwitch,
